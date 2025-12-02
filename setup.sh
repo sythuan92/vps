@@ -1,94 +1,143 @@
 #!/bin/bash
 
-# ====================================================
-# SCRIPT TỐI ƯU VPS CHO TRADING BOT (DOCKER READY)
-# Chức năng: Update, Tạo Swap RAM, Tối ưu TCP/BBR, Cài Docker
-# ====================================================
+# ==============================================================================
+# ULTIMATE TRADING VPS SETUP SCRIPT
+# Target: Ubuntu 20.04 / 22.04
+# Optimized for: Binance API, High Frequency Trading, WebSocket Stability
+# ==============================================================================
 
-echo ">>> BẮT ĐẦU CÀI ĐẶT HỆ THỐNG..."
+# Màu sắc cho dễ nhìn
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
 
-# 1. CẬP NHẬT HỆ THỐNG VÀ CÀI GÓI CƠ BẢN
-# ----------------------------------------------------
-echo "[1/5] Cập nhật Ubuntu và cài đặt gói cần thiết..."
+echo -e "${GREEN}>>> BẮT ĐẦU THIẾT LẬP HỆ THỐNG ĐUA TOP VOLUME...${NC}"
+
+# 1. KIỂM TRA QUYỀN ROOT
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}Lỗi: Vui lòng chạy script bằng quyền root (sudo).${NC}"
+  exit 1
+fi
+
+# 2. CẬP NHẬT HỆ THỐNG & CÀI ĐẶT CÔNG CỤ CƠ BẢN
+echo -e "${YELLOW}[1/6] Update hệ thống & Cài đặt tools...${NC}"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update && apt-get upgrade -y
-apt-get install -y curl wget git htop unzip ca-certificates gnupg lsb-release
+# Cài đặt các gói cần thiết:
+# - chrony: Đồng bộ thời gian cực chuẩn (Bắt buộc cho Trading)
+# - htop: Theo dõi tài nguyên
+# - curl/git/wget: Tải code
+# - haveged: Tăng entropy (giúp mã hóa SSL/TLS nhanh hơn khi handshake)
+apt-get install -y curl wget git htop unzip ca-certificates gnupg lsb-release chrony haveged
 
-# Cài đặt đồng bộ thời gian (Rất quan trọng cho Bot Trade để khớp lệnh chính xác)
-apt-get install -y chrony
+# Kích hoạt đồng bộ thời gian ngay lập tức
 systemctl enable chrony
 systemctl start chrony
+# Ép buộc đồng bộ ngay để tránh lệch giờ dù chỉ 1ms
+chronyc makestep
 
-# 2. TẠO SWAP RAM (QUAN TRỌNG CHO VPS 1GB-2GB RAM)
-# ----------------------------------------------------
-# Bot chạy Docker rất tốn RAM, nếu không có Swap sẽ bị crash (OOM Kill)
-echo "[2/5] Kiểm tra và tạo Swap RAM (2GB)..."
+# 3. TẠO SWAP RAM THÔNG MINH (Chống Crash cho VPS 1-2GB RAM)
+echo -e "${YELLOW}[2/6] Cấu hình Swap (RAM ảo)...${NC}"
+# Kiểm tra nếu chưa có swap thì mới tạo
 if grep -q "swap" /etc/fstab; then
-    echo "Swap đã tồn tại. Bỏ qua."
+    echo -e "${GREEN}Swap đã tồn tại. Bỏ qua.${NC}"
 else
+    # Tạo 2GB Swap
     fallocate -l 2G /swapfile
     chmod 600 /swapfile
     mkswap /swapfile
     swapon /swapfile
     echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+    
+    # Tinh chỉnh Swappiness: Chỉ dùng Swap khi RAM thật còn dưới 10%
+    # Giúp bot luôn chạy trên RAM thật (nhanh nhất), Swap chỉ là bảo hiểm.
+    sysctl vm.swappiness=10
     echo "vm.swappiness=10" >> /etc/sysctl.conf
     echo "vm.vfs_cache_pressure=50" >> /etc/sysctl.conf
-    echo "Đã tạo Swap 2GB thành công."
+    echo -e "${GREEN}Đã tạo Swap 2GB an toàn.${NC}"
 fi
 
-# 3. TỐI ƯU MẠNG (TCP BBR & KERNEL TUNING) - ĐUA TỐC ĐỘ
-# ----------------------------------------------------
-echo "[3/5] Tối ưu Network (TCP BBR & Kernel settings)..."
+# 4. TỐI ƯU KERNEL & MẠNG (PHẦN QUAN TRỌNG NHẤT)
+echo -e "${YELLOW}[3/6] Tối ưu Network Stack cho Trading (TCP BBR & Kernel Tuning)...${NC}"
 
-# Bật TCP BBR (Congestion Control) - Giảm độ trễ gói tin đi quốc tế
-if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
-    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-fi
+# Backup file config cũ
+cp /etc/sysctl.conf /etc/sysctl.conf.bak
 
-# Tối ưu các tham số mạng cho High Frequency Trading (API/WebSocket)
-cat <<EOF >> /etc/sysctl.conf
-# Tăng giới hạn file mở (cho nhiều kết nối socket)
-fs.file-max = 65535
-# Cho phép tái sử dụng socket đang ở trạng thái TIME-WAIT (quan trọng khi spam request)
-net.ipv4.tcp_tw_reuse = 1
-# Giảm thời gian chờ đóng kết nối
-net.ipv4.tcp_fin_timeout = 15
-# Tăng vùng đệm TCP (TCP Buffer) để nhận dữ liệu market nhanh hơn
+# Ghi đè các tham số tối ưu vào sysctl.conf
+cat <<EOF > /etc/sysctl.conf
+# --- TỐI ƯU BBR (Tăng tốc đường truyền quốc tế) ---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# --- TỐI ƯU KẾT NỐI (Keep-Alive & Session) ---
+# Giảm thời gian check kết nối chết (Mặc định 2 tiếng -> Giảm xuống 60s)
+# Giúp phát hiện mất mạng nhanh để bot Reconnect ngay.
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
+
+# --- TỐI ƯU BUFFER (Chống nghẽn khi thị trường bão) ---
+# Tăng vùng đệm để chứa lượng data khổng lồ từ WebSocket khi Pump/Dump
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.ipv4.tcp_rmem = 4096 87380 16777216
 net.ipv4.tcp_wmem = 4096 65536 16777216
-# Không để kết nối rơi vào trạng thái ngủ (idle)
+
+# --- TỐI ƯU PHẢN HỒI ---
+# Tắt tính năng "ngủ" của TCP. Luôn giữ kết nối ở trạng thái sẵn sàng cao nhất.
 net.ipv4.tcp_slow_start_after_idle = 0
+# Cho phép tái sử dụng socket nhanh (Recovery nhanh khi crash)
+net.ipv4.tcp_tw_reuse = 1
+# Giảm thời gian chờ đóng kết nối
+net.ipv4.tcp_fin_timeout = 15
+# Tăng giới hạn hàng đợi backlog (tránh từ chối kết nối khi quá tải)
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 4096
+# Tăng dải Port (mở được nhiều kết nối ra ngoài hơn)
+net.ipv4.ip_local_port_range = 1024 65535
+
+# Bảo vệ chống tấn công cơ bản (Syn Flood)
+net.ipv4.tcp_syncookies = 1
 EOF
 
-# Áp dụng thay đổi ngay lập tức
+# Áp dụng ngay lập tức
 sysctl -p
+echo -e "${GREEN}Network đã được tối ưu hoá tối đa!${NC}"
 
-# 4. CÀI ĐẶT DOCKER & DOCKER COMPOSE
-# ----------------------------------------------------
-echo "[4/5] Cài đặt Docker Engine..."
+# 5. TĂNG GIỚI HẠN FILE (Ulimit)
+echo -e "${YELLOW}[4/6] Tăng giới hạn File Descriptors...${NC}"
+# Mặc định Linux chỉ cho mở 1024 file. Bot trade ghi log và mở socket nhiều sẽ bị lỗi.
+bash -c 'echo "* soft nofile 65535" >> /etc/security/limits.conf'
+bash -c 'echo "* hard nofile 65535" >> /etc/security/limits.conf'
+bash -c 'echo "root soft nofile 65535" >> /etc/security/limits.conf'
+bash -c 'echo "root hard nofile 65535" >> /etc/security/limits.conf'
+
+# 6. CÀI ĐẶT DOCKER
+echo -e "${YELLOW}[5/6] Cài đặt Docker Engine...${NC}"
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com -o get-docker.sh
     sh get-docker.sh
-    # Xoá file script cài đặt cho gọn
     rm get-docker.sh
-    echo "Docker đã được cài đặt."
+    systemctl enable docker
+    systemctl start docker
+    echo -e "${GREEN}Docker cài đặt thành công.${NC}"
 else
-    echo "Docker đã có sẵn."
+    echo -e "${GREEN}Docker đã có sẵn.${NC}"
 fi
 
-# 5. DỌN DẸP
-# ----------------------------------------------------
-echo "[5/5] Dọn dẹp hệ thống..."
+# 7. DỌN DẸP
+echo -e "${YELLOW}[6/6] Dọn dẹp rác hệ thống...${NC}"
 apt-get autoremove -y
 apt-get clean
 
-echo "===================================================="
-echo " HOÀN TẤT! VPS ĐÃ SẴN SÀNG."
-echo " - Swap: 2GB (Đã kích hoạt)"
-echo " - Network: TCP BBR (Đã kích hoạt)"
-echo " - Docker: Ready"
-echo " Bây giờ bạn chỉ cần chạy lệnh: docker run ..."
-echo "===================================================="
+echo -e "============================================================"
+echo -e "${GREEN}   CÀI ĐẶT HOÀN TẤT - HỆ THỐNG SẴN SÀNG CHIẾN ĐẤU!   ${NC}"
+echo -e "============================================================"
+echo -e "Thông số hiện tại:"
+echo -e "- Congestion Control: $(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}') (Phải là bbr)"
+echo -e "- Swap: $(free -h | grep Swap | awk '{print $2}')"
+echo -e "- Time Sync: Chrony Active"
+echo -e "============================================================"
+echo -e "Hãy upload Docker Image và chạy lệnh: docker run ..."
+echo -e "============================================================"
